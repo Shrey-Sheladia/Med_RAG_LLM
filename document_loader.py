@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 
 from autologging import logged
@@ -7,13 +6,17 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
+from log_config import get_logger
 
-@logged
+logger = get_logger()
+
+
+@logged(logger)
 class DocumentStore:
     def __init__(self, path: Path | str, api_key: str):
         self._api_key = api_key
         self._doc_pages = []
-        self.index = None
+        self._index = None
         self._embeddings = OpenAIEmbeddings(api_key=self._api_key)
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000, chunk_overlap=100
@@ -22,24 +25,39 @@ class DocumentStore:
             path = Path(path)
         self._path = path
 
-        self._load_docs()
-
     def load_documents_to_index(self):
-        self.index = FAISS.from_documents(
-            documents=self._doc_pages, embedding=self._embeddings
-        )
-        logging.critical(f"Indexed {len(self._doc_pages)} documents")
+        index_path = self._path.parent / "saved_indices" / "document_index"
+        index_path = Path("document_index")
+        if index_path.exists():
+            self._index = FAISS.load_local(
+                str(index_path), 
+                self._embeddings, 
+                allow_dangerous_deserialization=True
+            )
+            logger.info("Loaded index from file")
+        else:
+            logger.info("Saved index not found. Indexing documents")
+            self._read_docs()
+            self._index_documents()
+            logger.info("Indexed documents")
+
+            logger.debug(f"Saving index to {index_path}")
+            self._index.save_local(str(index_path))
 
     def search(self, query: str, top_k: int = 5):
-        return self.index.similarity_search(query, top_k)
+        return self._index.similarity_search(query, top_k)
 
-    def _load_docs(self):
+    def _index_documents(self):
+        self._index = FAISS.from_documents(
+            documents=self._doc_pages, embedding=self._embeddings
+        )
+        logger.info(f"Indexed {len(self._doc_pages)} documents")
+
+    def _read_docs(self):
         for file in self._path.iterdir():
             if file.suffix == ".pdf":
                 page_content_docs = self._get_text_from_pdf(file)
-                logging.critical(
-                    f"Loaded {len(page_content_docs)} pages from {file.name}"
-                )
+                logger.info(f"Loaded {len(page_content_docs)} pages from {file.name}")
             else:
                 raise NotImplementedError("Only PDFs are supported")
 
@@ -56,8 +74,6 @@ if __name__ == "__main__":
 
     from dotenv import load_dotenv
 
-    logging.basicConfig(level=logging.CRITICAL)
-
     load_dotenv()
 
     folder = Path("./docs")
@@ -69,5 +85,5 @@ if __name__ == "__main__":
     query = "What is wizards chess?"
     results = docs_store.search(query)
     for result in results:
-        print(result)
-        print("\n\n\n")
+        logger.debug(result.page_content[:100])
+        logger.debug("\n")
